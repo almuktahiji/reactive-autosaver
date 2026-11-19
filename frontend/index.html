@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-Saver — Reactive Network demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.6rem; margin-bottom: 0; }
+  .sub { color: #888; margin-top: .2rem; }
+  .card { border: 1px solid #8885; border-radius: 12px; padding: 1rem 1.2rem; margin: 1rem 0; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  button { padding: .55rem .9rem; border-radius: 8px; border: 1px solid #8888; background: #2f6fed; color: #fff; cursor: pointer; font-size: .95rem; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.secondary { background: transparent; color: inherit; }
+  input { padding: .5rem; border-radius: 8px; border: 1px solid #8888; width: 7rem; }
+  code, .mono { font-family: ui-monospace, monospace; font-size: .85rem; word-break: break-all; }
+  .big { font-size: 2rem; font-weight: 700; }
+  .muted { color: #888; font-size: .9rem; }
+  #log li { margin: .35rem 0; }
+  .ok { color: #1a9e54; } .warn { color: #c77d00; }
+  .pill { display: inline-block; border: 1px solid #8888; border-radius: 999px; padding: .1rem .6rem; font-size: .8rem; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+<h1>💰 Auto-Saver</h1>
+<p class="sub">Set it once, forget it — every SAVE you receive auto-saves a % into your vault, via Reactive Network.</p>
+<p><span class="pill">TESTNET ONLY — Lasna + Base Sepolia, no real funds</span></p>
+
+<div class="card">
+  <div class="row">
+    <button id="connectBtn">Connect wallet</button>
+    <span id="account" class="mono muted">not connected</span>
+  </div>
+  <p class="muted" id="network">Network: —</p>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Your auto-save</h2>
+  <p>Savings rate: <span class="big" id="pct">—</span></p>
+  <p class="muted">Registered on the reactive contract (Lasna). The demo wallet is pre-registered at 10% at deploy time.</p>
+  <div class="row">
+    <input id="pctInput" type="number" min="0" max="100" value="10" aria-label="Savings percent">
+    <button id="setPctBtn" class="secondary" disabled>Set my % (owner only)</button>
+  </div>
+  <p>SAVE balance: <b id="saveBal">—</b> &nbsp;·&nbsp; Vault allowance: <b id="allowance">—</b></p>
+  <p>Saved in vault: <b id="savedBal">—</b> SAVE &nbsp;·&nbsp; Total swept (all users): <b id="totalSaved">—</b></p>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Try the loop</h2>
+  <ol>
+    <li><b>Get test tokens</b> — free SAVE from the token faucet.</li>
+    <li><b>Approve the vault</b> — one-time, lets the vault pull your sweeps.</li>
+    <li><b>Send a test transfer</b> — send 100 SAVE to yourself. You are the registered recipient, so the reactive contract sweeps 10% (10 SAVE) into your vault automatically.</li>
+  </ol>
+  <div class="row">
+    <button id="faucetBtn" disabled>Get 10,000 SAVE</button>
+    <button id="approveBtn" disabled>Approve vault</button>
+    <button id="transferBtn" disabled>Send 100 SAVE to myself</button>
+    <button id="refreshBtn" class="secondary">Refresh</button>
+  </div>
+  <p class="muted">After the transfer, watch the vault balance below — the sweep lands when the Reactive Network callback confirms (usually &lt; 1 min). <a id="rscLink" href="#" target="_blank" rel="noopener">View the reactive contract on Reactscan ↗</a></p>
+  <p id="sweepStatus" class="ok"></p>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Activity</h2>
+  <ul id="log"><li class="muted">No transactions yet.</li></ul>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Contracts</h2>
+  <p class="mono" id="contracts">Loading config…</p>
+  <p class="muted">How it works: <code>SaveToken Transfer</code> (Base Sepolia) → <code>AutoSaverReactive.react()</code> (Lasna) → callback <code>AutoSaverVault.sweep()</code> (Base Sepolia) → <code>transferFrom</code> pulls the % into the vault.</p>
+</div>
+
+<script>
+const BASE_SEPOLIA_CHAIN = 84532;
+const BASE_EXPLORER = "https://sepolia.basescan.org";
+const LASNA_EXPLORER = "https://lasna.reactscan.net";
+
+const ERC20_ABI = [
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function faucet()",
+  "function decimals() view returns (uint8)"
+];
+const RSC_ABI = [
+  "function savingsPct(address) view returns (uint256)",
+  "function totalSweepRequested(address) view returns (uint256)",
+  "function vault() view returns (address)",
+  "function token() view returns (address)",
+  "function setSavingsPct(address user, uint256 pct)"
+];
+const VAULT_ABI = [
+  "function saved(address) view returns (uint256)",
+  "function totalSaved() view returns (uint256)"
+];
+
+let cfg = null, provider = null, signer = null, account = null;
+let token = null, rscRead = null, vaultRead = null;
+let baseProvider, lasnaProvider;
+
+const $ = (id) => document.getElementById(id);
+
+function logTx(label, hash, explorer) {
+  const ul = $("log");
+  if (ul.querySelector(".muted")) ul.innerHTML = "";
+  const li = document.createElement("li");
+  li.innerHTML = `${label}: <a class="mono" href="${explorer}/tx/${hash}" target="_blank" rel="noopener">${hash.slice(0, 18)}…</a>`;
+  ul.prepend(li);
+}
+
+function fmt(v) { return v == null ? "—" : Number(ethers.formatEther(v)).toLocaleString(undefined, { maximumFractionDigits: 4 }); }
+
+async function loadConfig() {
+  try {
+    cfg = await (await fetch("config.json")).json();
+  } catch (e) {
+    $("contracts").textContent = "config.json not found — run ./deploy.sh first, or copy config.example.json to config.json and fill in the addresses.";
+    return false;
+  }
+  $("contracts").innerHTML =
+    `SaveToken (Base Sepolia): <a href="${BASE_EXPLORER}/address/${cfg.token}" target="_blank" rel="noopener">${cfg.token}</a><br>` +
+    `AutoSaverReactive (Lasna): <a href="${LASNA_EXPLORER}/address/${cfg.reactive}" target="_blank" rel="noopener">${cfg.reactive}</a><br>` +
+    `AutoSaverVault (Base Sepolia): <a href="${BASE_EXPLORER}/address/${cfg.vault}" target="_blank" rel="noopener">${cfg.vault}</a>`;
+  $("rscLink").href = `${LASNA_EXPLORER}/address/${cfg.reactive}`;
+  baseProvider = new ethers.JsonRpcProvider(cfg.baseSepoliaRpc || "https://sepolia.base.org");
+  lasnaProvider = new ethers.JsonRpcProvider(cfg.lasnaRpc || "https://lasna-rpc.rnk.dev");
+  rscRead = new ethers.Contract(cfg.reactive, RSC_ABI, lasnaProvider);
+  vaultRead = new ethers.Contract(cfg.vault, VAULT_ABI, baseProvider);
+  return true;
+}
+
+async function refresh() {
+  if (!cfg) return;
+  try {
+    if (account) {
+      $("pct").textContent = (await rscRead.savingsPct(account)).toString() + "%";
+      $("saveBal").textContent = fmt(await new ethers.Contract(cfg.token, ERC20_ABI, baseProvider).balanceOf(account)) + " SAVE";
+      $("allowance").textContent = fmt(await new ethers.Contract(cfg.token, ERC20_ABI, baseProvider).allowance(account, cfg.vault)) + " SAVE";
+      $("savedBal").textContent = fmt(await vaultRead.saved(account));
+    }
+    $("totalSaved").textContent = fmt(await vaultRead.totalSaved()) + " SAVE";
+  } catch (e) { console.warn("refresh failed", e); }
+}
+
+async function connect() {
+  if (!window.ethereum) { alert("MetaMask (or another injected wallet) is required for this demo."); return; }
+  provider = new ethers.BrowserProvider(window.ethereum);
+  const net = await provider.getNetwork();
+  $("network").textContent = `Network: chain ${net.chainId} ${Number(net.chainId) === BASE_SEPOLIA_CHAIN ? "(Base Sepolia ✓)" : "— switch to Base Sepolia (84532) for token actions"}`;
+  if (Number(net.chainId) !== BASE_SEPOLIA_CHAIN) {
+    try {
+      await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x14a34" }] });
+    } catch (e) {
+      try {
+        await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{ chainId: "0x14a34", chainName: "Base Sepolia", nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrls: ["https://sepolia.base.org"], blockExplorerUrls: [BASE_EXPLORER] }] });
+      } catch (e2) { console.warn("chain switch failed", e2); }
+    }
+    signer = await provider.getSigner();
+  } else {
+    signer = await provider.getSigner();
+  }
+  account = await signer.getAddress();
+  $("account").textContent = account;
+  $("connectBtn").textContent = "Connected ✓";
+  token = new ethers.Contract(cfg.token, ERC20_ABI, signer);
+  for (const id of ["faucetBtn", "approveBtn", "transferBtn", "setPctBtn"]) $(id).disabled = false;
+  await refresh();
+}
+
+async function watchSweep(before) {
+  $("sweepStatus").textContent = "⏳ Transfer sent — waiting for the Reactive callback to sweep into the vault…";
+  for (let i = 0; i < 24; i++) { // up to ~2 min
+    await new Promise((r) => setTimeout(r, 5000));
+    await refresh();
+    const after = await vaultRead.saved(account);
+    if (after > before) {
+      $("sweepStatus").textContent = `✅ Sweep landed! Vault savings grew by ${fmt(after - before)} SAVE (10% of your 100 SAVE transfer).`;
+      return;
+    }
+  }
+  $("sweepStatus").textContent = "⌛ No sweep seen after ~2 min — check the reactive contract on Reactscan (it may need funding / more time).";
+}
+
+$("connectBtn").onclick = connect;
+$("refreshBtn").onclick = refresh;
+$("faucetBtn").onclick = async () => {
+  const tx = await token.faucet();
+  logTx("Faucet (10,000 SAVE)", tx.hash, BASE_EXPLORER);
+  await tx.wait(); await refresh();
+};
+$("approveBtn").onclick = async () => {
+  const tx = await token.approve(cfg.vault, ethers.MaxUint256);
+  logTx("Approve vault (unlimited)", tx.hash, BASE_EXPLORER);
+  await tx.wait(); await refresh();
+};
+$("transferBtn").onclick = async () => {
+  const before = await vaultRead.saved(account);
+  const tx = await token.transfer(account, ethers.parseEther("100")); // to self: triggers the loop
+  logTx("Test transfer (100 SAVE to self)", tx.hash, BASE_EXPLORER);
+  await tx.wait(); await refresh();
+  watchSweep(before);
+};
+$("setPctBtn").onclick = async () => {
+  const pct = Number($("pctInput").value);
+  const rsc = new ethers.Contract(cfg.reactive, RSC_ABI, signer);
+  alert("This sends a transaction on Lasna (needs lREACT) and only works for the contract owner.");
+  const tx = await rsc.setSavingsPct(account, pct);
+  logTx(`Set savings % to ${pct}`, tx.hash, LASNA_EXPLORER);
+  await tx.wait(); await refresh();
+};
+
+loadConfig().then((ok) => { if (ok) refresh(); });
+setInterval(() => { if (cfg) refresh(); }, 30000);
+</script>
+</body>
+</html>
