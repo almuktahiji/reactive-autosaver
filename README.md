@@ -83,7 +83,7 @@ Deploy (needs the throwaway testnet deployer — see `deploy.sh` header for
 funding; **do not run until funded**):
 
 ```bash
-./swap-lreact.sh  # 0.1 Base Sepolia ETH -> 10 lREACT (run first)
+./swap-lreact.sh  # 0.015 Base Sepolia ETH -> 1.5 lREACT (run first)
 ./deploy.sh       # deploys token -> RSC -> vault, wires them, funds both
 ./verify.sh       # Sourcify verification on both testnets
 ```
@@ -104,21 +104,39 @@ the vault → send 100 SAVE to yourself (you are the pre-registered
 recipient at 10%) → watch 10 SAVE land in the vault when the callback
 confirms. Every transaction links to its explorer.
 
-## Testnet addresses
+## Live deployment — proven on testnet
+
+Demo video (2:21): https://www.youtube.com/watch?v=TZzzYCTF0z4
 
 | Contract | Chain | Address |
 |---|---|---|
-| SaveToken | Base Sepolia (84532) | _TBD after deploy_ |
-| AutoSaverReactive | Lasna (5318007) | _TBD after deploy_ |
-| AutoSaverVault | Base Sepolia (84532) | _TBD after deploy_ |
+| SaveToken | Base Sepolia (84532) | 0x45e352624332b1947957f1961ad2119859186E84 |
+| AutoSaverReactive | Lasna (5318007) | 0x9C12cA13DfA4A010faca2d8aeDFF972Ac21203A8 |
+| AutoSaverVault | Base Sepolia (84532) | 0x2A182e140Fa778c02F36284191853f4ef669914D |
+
+All three contracts are **verified exact_match on Sourcify**. The RSC is
+configured with the vault and a 10% savings rate for the demo user.
+
+### The full loop, live (20 Nov 2026, real transactions — not a simulation)
+
+1. Trigger: self-transfer of **1,000 SAVE** to the registered demo user —
+   [tx 0x9f0cbc47ae2848205e0927aa15df5754978ec1b9b16f5410af119e593088756e](https://sepolia.basescan.org/tx/0x9f0cbc47ae2848205e0927aa15df5754978ec1b9b16f5410af119e593088756e)
+   (block 61160883).
+2. The RSC on Lasna saw the Transfer event, computed the 10% sweep and
+   requested the callback.
+3. Sweep: the vault pulled exactly **100 SAVE** from the user —
+   [tx 0x0784f60f56aca72075d5b67b68528d6ba13ffff85141727dbe56bc8df8c44508](https://sepolia.basescan.org/tx/0x0784f60f56aca72075d5b67b68528d6ba13ffff85141727dbe56bc8df8c44508)
+   (block 61160888, 5 blocks later).
+4. On-chain state after the loop: `vault.saved(user) = 100 SAVE`,
+   vault SAVE balance = 100, `RSC.totalSweepRequested(user) = 100`.
 
 Explorers: [lasna.reactscan.net](https://lasna.reactscan.net) ·
 [sepolia.basescan.org](https://sepolia.basescan.org)
 
-Funding needed (testnet only): ~0.15 Base Sepolia ETH total — 0.1 ETH swaps
-to 10 lREACT for the Lasna side, ~0.02 ETH for the Base deploys, ~0.03 ETH
-to fund the vault's callback fees. Base Sepolia ETH comes from the faucet
-(captcha): https://faucet.zalalena.com/base
+Funding used (testnet only): 0.05 Sepolia ETH from the Google Cloud
+faucet → bridged 0.049 ETH to Base Sepolia → swapped 0.015 ETH for
+1.5 lREACT (rate 1 ETH = 100 lREACT) → deployed all three contracts,
+funded the vault with 0.01 ETH and the RSC with 1 lREACT.
 
 ## Tests
 
